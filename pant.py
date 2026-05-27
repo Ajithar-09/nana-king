@@ -3,7 +3,7 @@ import base64
 import logging
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
@@ -224,6 +224,7 @@ async def generate_pant_tryon(
 
 @router.post("/api/pant-try-on")
 async def pant_try_on(
+    request: Request,
     user_photo:  UploadFile = File(..., description="User's photo — full body OR bottom half (waist down)"),
     pant_photo:  UploadFile = File(..., description="Pants / shorts / jeans photo"),
     pant_size:   str        = Form(..., description="Size: S, M, L, XL or waist 28, 30, 32..."),
@@ -294,10 +295,12 @@ async def pant_try_on(
         )
 
         logger.info("[RESPONSE] ✅ Sending pant try-on success response")
+        base_url = str(request.base_url)
+        dynamic_url = f"{base_url}outputs/{result['filename']}"
         return JSONResponse(
             status_code=200,
             content={
-                "image_url": result["image_url"]
+                "image_url": dynamic_url
             }
         )
 

@@ -3,7 +3,7 @@ import base64
 import logging
 import uuid
 from pathlib import Path
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -287,6 +287,7 @@ async def root():
 
 @app.post("/api/try-on")
 async def virtual_try_on(
+    request: Request,
     user_photo:  UploadFile = File(...,  description="User's half-body photo (upper body)"),
     dress_photo: UploadFile = File(...,  description="Dress / shirt / t-shirt photo"),
     dress_size:  str        = Form(...,  description="Dress size: S, M, L, XL, XXL")
@@ -341,10 +342,12 @@ async def virtual_try_on(
         )
 
         logger.info("[RESPONSE] ✅ Sending success response to client")
+        base_url = str(request.base_url)
+        dynamic_url = f"{base_url}outputs/{result['filename']}"
         return JSONResponse(
             status_code=200,
             content={
-                "image_url": result["image_url"]
+                "image_url": dynamic_url
             }
         )
 
