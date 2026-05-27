@@ -21,7 +21,7 @@ OPENAI_MODEL   = os.getenv("OPENAI_MODEL")
 VISION_MODEL   = os.getenv("VISION_MODEL")
 
 # ─── OpenAI Client ────────────────────────────────────────────
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = AsyncOpenAI(api_key=OPENAI_API_KEY or "placeholder_key_not_set")
 
 # ─── Output Folder ────────────────────────────────────────────
 OUTPUT_DIR = Path("outputs")

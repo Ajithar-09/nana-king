@@ -32,7 +32,7 @@ logger.info(f"[CONFIG] Image Model  : {OPENAI_MODEL}")
 logger.info(f"[CONFIG] Vision Model : {VISION_MODEL}")
 
 # ─── OpenAI Client ────────────────────────────────────────────
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = AsyncOpenAI(api_key=OPENAI_API_KEY or "placeholder_key_not_set")
 
 # ─── Output Folder Setup ──────────────────────────────────────
 OUTPUT_DIR = Path("outputs")
