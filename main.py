@@ -2,7 +2,7 @@ import os
 import logging
 import uvicorn
 from dotenv import load_dotenv
-from virtual_tryon import app
+from shirt import app
 
 load_dotenv()
 

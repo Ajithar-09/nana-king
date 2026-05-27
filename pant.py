@@ -297,17 +297,7 @@ async def pant_try_on(
         return JSONResponse(
             status_code=200,
             content={
-                "success": True,
-                "data": {
-                    "image_url":    result["image_url"],
-                    "filename":     result["filename"],
-                    "image_base64": result["image_base64"],
-                    "pant_size":    pant_size.upper(),
-                    "pant_type":    pant_type,
-                    "photo_type":   photo_type,
-                    "gender":       gender,
-                    "message":      result["message"]
-                }
+                "image_url": result["image_url"]
             }
         )
 

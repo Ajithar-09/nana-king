@@ -11,6 +11,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from PIL import Image
 import io
+import json
 
 load_dotenv()
 
@@ -24,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 # ─── Config from .env ─────────────────────────────────────────
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-image-1")
-VISION_MODEL   = os.getenv("VISION_MODEL", "gpt-4o")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL")
+VISION_MODEL   = os.getenv("VISION_MODEL")
 
 logger.info(f"[CONFIG] Image Model  : {OPENAI_MODEL}")
 logger.info(f"[CONFIG] Vision Model : {VISION_MODEL}")
@@ -104,89 +105,114 @@ def validate_image(file: UploadFile, label: str):
     logger.info(f"[VALIDATION] ✅ {label} | Type: {content_type} | Name: {file.filename}")
 
 
-async def analyze_dress_with_vision(dress_photo_bytes: bytes, dress_type: str) -> str:
+async def analyze_photos_with_vision(user_photo_bytes: bytes, dress_photo_bytes: bytes) -> dict:
     """
-    Use Vision Model to analyze the dress photo and return a detailed description.
-    Model is read from VISION_MODEL in .env
+    Use Vision Model to analyze both the user photo and the dress photo.
+    Returns a dictionary containing 'gender', 'dress_type', and 'description'.
     """
-    logger.info(f"[VISION] Analyzing dress photo with {VISION_MODEL}...")
+    logger.info(f"[VISION] Analyzing user & dress photos with {VISION_MODEL}...")
+    user_b64 = image_to_base64(user_photo_bytes)
     dress_b64 = image_to_base64(dress_photo_bytes)
 
-    response = await client.chat.completions.create(
-        model=VISION_MODEL,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{dress_b64}"}
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        f"Analyze this {dress_type} for a virtual try-on. "
-                        f"Describe only the clothing details precisely: "
-                        f"1) Exact color(s) "
-                        f"2) Pattern (solid, stripes, graphic, etc.) "
-                        f"3) Collar or neckline style "
-                        f"4) Sleeve type and length "
-                        f"5) Any logos, text, or prints with exact position "
-                        f"6) Buttons, zippers, or special details "
-                        f"7) Fit style (slim, regular, oversized) "
-                        f"Keep the description short and precise."
-                    )
-                }
-            ]
-        }],
-        max_tokens=300
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=VISION_MODEL,
+            response_format={"type": "json_object"},
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{user_b64}"}
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{dress_b64}"}
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Analyze these two photos for a virtual try-on:\n"
+                            "The first image is the user's photo.\n"
+                            "The second image is the dress photo.\n"
+                            "Please return a JSON object with the following fields:\n"
+                            "1. 'gender': Determine the gender of the user from the first photo. It must be one of: 'man', 'woman', or 'person'.\n"
+                            "2. 'dress_type': Determine the type of clothing in the second photo. It must be a short name like 'shirt', 't-shirt', 'hoodie', 'sweater', 'top', etc.\n"
+                            "3. 'description': A detailed description of the dress in the second photo (color, pattern, neckline, sleeve length, logos/prints, buttons/zippers, etc.) for try-on editing.\n\n"
+                            "Provide the response in raw JSON format matching this schema:\n"
+                            "{\"gender\": string, \"dress_type\": string, \"description\": string}"
+                        )
+                    }
+                ]
+            }],
+            max_tokens=400
+        )
 
-    description = response.choices[0].message.content
-    logger.info(f"[VISION] Dress analyzed | Description: {description[:100]}...")
-    return description
+        result_text = response.choices[0].message.content
+        logger.info(f"[VISION] Analysis response: {result_text}")
+        data = json.loads(result_text)
+        
+        # Ensure fallback keys exist and are valid
+        data.setdefault("gender", "person")
+        data.setdefault("dress_type", "t-shirt")
+        data.setdefault("description", "clothing")
+        
+        if data["gender"] not in ("man", "woman", "person"):
+            data["gender"] = "person"
+            
+        return data
+
+    except Exception as e:
+        logger.error(f"[VISION ERROR] Vision analysis failed, using fallbacks: {str(e)}")
+        return {
+            "gender": "person",
+            "dress_type": "t-shirt",
+            "description": "clothing swap"
+        }
 
 
 async def generate_virtual_tryon(
     user_photo_bytes: bytes,
     dress_photo_bytes: bytes,
-    dress_size: str,
-    dress_type: str,
-    gender: str = "person"
+    dress_size: str
 ) -> dict:
     """
     Generate virtual try-on by editing the actual user photo to wear the given dress.
 
     Steps:
       1. Resize both images
-      2. Analyze dress photo using GPT-4o Vision → detailed description
+      2. Analyze photos using GPT-4o Vision → gender, dress_type, dress_description
       3. Use images.edit() on user's real photo with dress description
       4. Save generated image to outputs/ folder
-      5. Return image URL and base64
+      5. Return image URL
     """
-    logger.info(f"[TRY-ON START] Type: {dress_type} | Size: {dress_size} | Gender: {gender}")
+    logger.info(f"[TRY-ON START] Size: {dress_size}")
 
     # ── Step 1: Resize images ──────────────────────────────────
     logger.info("[STEP 1] Resizing images...")
     user_photo_resized  = resize_image(user_photo_bytes,  max_size=1024)
     dress_photo_resized = resize_image(dress_photo_bytes, max_size=1024)
 
-    # ── Step 2: Analyze dress with GPT-4o Vision ──────────────
-    logger.info("[STEP 2] Analyzing dress with GPT-4o Vision...")
-    dress_description = await analyze_dress_with_vision(dress_photo_resized, dress_type)
+    # ── Step 2: Analyze photos with GPT-4o Vision ──────────────
+    logger.info("[STEP 2] Analyzing photos with GPT-4o Vision...")
+    analysis = await analyze_photos_with_vision(user_photo_resized, dress_photo_resized)
+    gender = analysis["gender"]
+    dress_type = analysis["dress_type"]
+    dress_description = analysis["description"]
+
+    logger.info(f"[ANALYSIS DETECTED] Gender: {gender} | Type: {dress_type} | Desc: {dress_description[:100]}...")
 
     # ── Step 3: Build edit prompt ──────────────────────────────
     prompt = (
-        f"Minimal clothing swap only. "
-        f"In this photo, change ONLY the {dress_type} the {gender} is wearing. "
-        f"Replace it with this exact {dress_type}: {dress_description}. "
+        f"Replace the entire upper body clothing of the {gender} with ONLY this exact {dress_type}: {dress_description}. "
+        f"Remove any jackets, cardigans, sweaters, overcoats, coats, hoodies, or other outer layers the person is wearing. "
+        f"The {gender} must wear ONLY the new {dress_type} directly on their torso, with no other outer layers or undergarments visible. "
         f"STRICT RULES — DO NOT change anything else: "
-        f"- Face, hair, skin tone: MUST remain pixel-perfect identical. "
+        f"- Face, hair, skin tone, hands: MUST remain pixel-perfect identical. "
         f"- Body position and pose: MUST remain exactly the same. "
         f"- Background and lighting: MUST remain exactly the same. "
-        f"- Only the clothing fabric/color/pattern in the torso area changes. "
         f"- The new {dress_type} must fit naturally on the body for size {dress_size}. "
-        f"- Preserve all natural wrinkles and shadows consistent with the original photo. "
-        f"- Result must look like the original photo with only the shirt swapped."
+        f"- Result must look like the original person wearing ONLY the new {dress_type}."
     )
     logger.info(f"[STEP 3] Edit prompt built | Length: {len(prompt)} chars")
 
@@ -263,9 +289,7 @@ async def root():
 async def virtual_try_on(
     user_photo:  UploadFile = File(...,  description="User's half-body photo (upper body)"),
     dress_photo: UploadFile = File(...,  description="Dress / shirt / t-shirt photo"),
-    dress_size:  str        = Form(...,  description="Dress size: S, M, L, XL, XXL"),
-    dress_type:  str        = Form(default="t-shirt", description="Type: shirt, t-shirt, top, etc."),
-    gender:      str        = Form(default="person",  description="person / man / woman")
+    dress_size:  str        = Form(...,  description="Dress size: S, M, L, XL, XXL")
 ):
     """
     Virtual Try-On Endpoint.
@@ -279,9 +303,7 @@ async def virtual_try_on(
     logger.info("[TRY-ON REQUEST] 📥 New request received")
     logger.info(f"  User Photo : {user_photo.filename}")
     logger.info(f"  Dress Photo: {dress_photo.filename}")
-    logger.info(f"  Dress Type : {dress_type}")
     logger.info(f"  Dress Size : {dress_size}")
-    logger.info(f"  Gender     : {gender}")
     logger.info("=" * 60)
 
     # Validate size
@@ -315,25 +337,14 @@ async def virtual_try_on(
         result = await generate_virtual_tryon(
             user_photo_bytes=user_photo_bytes,
             dress_photo_bytes=dress_photo_bytes,
-            dress_size=dress_size.upper(),
-            dress_type=dress_type,
-            gender=gender
+            dress_size=dress_size.upper()
         )
 
         logger.info("[RESPONSE] ✅ Sending success response to client")
         return JSONResponse(
             status_code=200,
             content={
-                "success": True,
-                "data": {
-                    "image_url":    result["image_url"],
-                    "filename":     result["filename"],
-                    "image_base64": result["image_base64"],
-                    "dress_size":   dress_size.upper(),
-                    "dress_type":   dress_type,
-                    "gender":       gender,
-                    "message":      result["message"]
-                }
+                "image_url": result["image_url"]
             }
         )
 
