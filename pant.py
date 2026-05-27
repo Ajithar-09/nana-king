@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 from fastapi import APIRouter, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
+import openai
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from PIL import Image
@@ -25,7 +26,7 @@ VISION_MODEL   = os.getenv("VISION_MODEL")
 client = AsyncOpenAI(api_key=OPENAI_API_KEY or "placeholder_key_not_set")
 
 # ─── Output Folder ────────────────────────────────────────────
-OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # ─── Router ───────────────────────────────────────────────────
@@ -67,13 +68,29 @@ def image_to_base64_pant(image_bytes: bytes) -> str:
 def validate_image_pant(file: UploadFile, label: str):
     """Accept any image format — Pillow handles conversion internally."""
     content_type = file.content_type or ""
-    if not content_type.startswith("image/"):
+    if not content_type.startswith("image/") and content_type != "application/octet-stream":
         logger.warning(f"[PANT VALIDATION] ❌ Invalid {label}: {content_type}")
         raise HTTPException(
             status_code=400,
             detail=f"{label} must be an image file. Got: {content_type}"
         )
     logger.info(f"[PANT VALIDATION] ✅ {label} | Type: {content_type} | Name: {file.filename}")
+
+
+def validate_image_integrity_pant(image_bytes: bytes, label: str):
+    """Ensure image bytes are valid and can be opened/verified by PIL."""
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail=f"{label} is empty.")
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.verify()  # Verifies file integrity
+    except Exception as e:
+        logger.warning(f"[PANT VALIDATION] ❌ Invalid image bytes for {label}: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} is not a valid image file or is corrupted."
+        )
+
 
 
 async def analyze_photos_with_vision_pant(user_photo_bytes: bytes, pant_photo_bytes: bytes) -> dict:
@@ -150,7 +167,8 @@ async def analyze_photos_with_vision_pant(user_photo_bytes: bytes, pant_photo_by
 async def generate_pant_tryon(
     user_photo_bytes: bytes,
     pant_photo_bytes: bytes,
-    pant_size: str
+    pant_size: str,
+    base_url: str = "http://localhost:8000/"
 ) -> dict:
     """
     Generate virtual pant/shorts try-on by editing user's photo.
@@ -234,8 +252,7 @@ async def generate_pant_tryon(
     with open(file_path, "wb") as f:
         f.write(image_bytes_out)
 
-    port      = int(os.getenv("PORT", 8000))
-    image_url = f"http://localhost:{port}/outputs/{filename}"
+    image_url = f"{base_url}outputs/{filename}"
 
     logger.info(f"[STEP 6] Image saved → {file_path}")
     logger.info(f"[STEP 6] Access URL  → {image_url}")
@@ -271,8 +288,8 @@ async def pant_try_on(request: Request):
     form_data = {k.strip(): v for k, v in form.items()}
 
     user_photo = form_data.get("user_photo")
-    pant_photo = form_data.get("pant_photo") or form_data.get("dress_photo")
-    pant_size = form_data.get("pant_size") or form_data.get("dress_size")
+    pant_photo = form_data.get("dress_photo") or form_data.get("pant_photo")
+    pant_size = form_data.get("dress_size") or form_data.get("pant_size")
 
     if not user_photo or not getattr(user_photo, "filename", None):
         logger.warning(f"[VALIDATION] ❌ Missing user photo. Available keys: {list(form_data.keys())}")
@@ -282,17 +299,17 @@ async def pant_try_on(request: Request):
         )
 
     if not pant_photo or not getattr(pant_photo, "filename", None):
-        logger.warning(f"[VALIDATION] ❌ Missing pant photo. Available keys: {list(form_data.keys())}")
+        logger.warning(f"[VALIDATION] ❌ Missing dress photo. Available keys: {list(form_data.keys())}")
         raise HTTPException(
             status_code=400,
-            detail="pant_photo is required."
+            detail="dress_photo is required."
         )
 
     if not pant_size:
         logger.warning(f"[VALIDATION] ❌ Missing size. Available keys: {list(form_data.keys())}")
         raise HTTPException(
             status_code=400,
-            detail="pant_size is required."
+            detail="dress_size is required."
         )
 
     pant_size_str = str(pant_size).strip()
@@ -300,20 +317,20 @@ async def pant_try_on(request: Request):
     logger.info("=" * 60)
     logger.info("[PANT REQUEST] 📥 New pant try-on request")
     logger.info(f"  User Photo : {user_photo.filename}")
-    logger.info(f"  Pant Photo : {pant_photo.filename}")
-    logger.info(f"  Pant Size  : {pant_size_str}")
+    logger.info(f"  Dress Photo: {pant_photo.filename}")
+    logger.info(f"  Dress Size : {pant_size_str}")
     logger.info("=" * 60)
 
     # Validate size: allows standard sizes (XS, S, M, L, XL, XXL, XXXL) or any numeric size
     size_upper = pant_size_str.upper()
     if size_upper not in VALID_SIZES and not size_upper.isdigit():
-        logger.warning(f"[VALIDATION] ❌ Invalid pant size: {pant_size_str}")
+        logger.warning(f"[VALIDATION] ❌ Invalid size: {pant_size_str}")
         raise HTTPException(
             status_code=400,
             detail=f"Invalid size '{pant_size_str}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
         )
 
-    # Validate images
+    # Validate content-type headers
     validate_image_pant(user_photo, "User photo")
     validate_image_pant(pant_photo, "Pant photo")
 
@@ -328,27 +345,51 @@ async def pant_try_on(request: Request):
     if len(pant_photo_bytes) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Pant photo exceeds 10MB limit")
 
+    # Validate image bytes integrity
+    validate_image_integrity_pant(user_photo_bytes, "User photo")
+    validate_image_integrity_pant(pant_photo_bytes, "Pant photo")
+
     logger.info(f"[READ] User photo : {len(user_photo_bytes) / 1024:.1f} KB")
     logger.info(f"[READ] Pant photo : {len(pant_photo_bytes) / 1024:.1f} KB")
+
+    base_url = str(request.base_url)
 
     # Generate try-on
     try:
         result = await generate_pant_tryon(
             user_photo_bytes=user_photo_bytes,
             pant_photo_bytes=pant_photo_bytes,
-            pant_size=size_upper
+            pant_size=size_upper,
+            base_url=base_url
         )
 
         logger.info("[RESPONSE] ✅ Sending pant try-on success response")
-        base_url = str(request.base_url)
-        dynamic_url = f"{base_url}outputs/{result['filename']}"
         return JSONResponse(
             status_code=200,
             content={
-                "image_url": dynamic_url
+                "image_url": result["image_url"]
             }
         )
 
+    except openai.RateLimitError as e:
+        logger.error(f"[RATE LIMIT] ❌ Rate limit exceeded: {str(e)}")
+        raise HTTPException(
+            status_code=429,
+            detail="AI service rate limit exceeded. Please wait a moment before trying again."
+        )
+    except openai.APIConnectionError as e:
+        logger.error(f"[CONNECTION ERROR] ❌ Connection error: {str(e)}")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach the AI service provider. Please verify network connectivity."
+        )
+    except openai.APIStatusError as e:
+        logger.error(f"[API ERROR] ❌ OpenAI status error {e.status_code}: {e.message}")
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f"AI service error: {e.message}"
+        )
     except Exception as e:
         logger.error(f"[PANT ERROR] ❌ Pant try-on failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Pant try-on failed: {str(e)}")
+

@@ -25,8 +25,9 @@ async def health_check():
 
 # ─── Run Server ────────────────────────────────────────────────
 if __name__ == "__main__":
-    port  = int(os.getenv("PORT"))
-    model = os.getenv("OPENAI_MODEL")
+    port_env = os.getenv("PORT")
+    port     = int(port_env) if port_env else 8000
+    model    = os.getenv("OPENAI_MODEL")
     logger.info("🚀 Starting Virtual Try-On API Server...")
     logger.info(f"📍 Port  : {port}")
     logger.info(f"🤖 Model : {model}")

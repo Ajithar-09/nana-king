@@ -2,11 +2,14 @@ import os
 import base64
 import logging
 import uuid
+import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+import openai
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from PIL import Image
@@ -35,9 +38,35 @@ logger.info(f"[CONFIG] Vision Model : {VISION_MODEL}")
 client = AsyncOpenAI(api_key=OPENAI_API_KEY or "placeholder_key_not_set")
 
 # ─── Output Folder Setup ──────────────────────────────────────
-OUTPUT_DIR = Path("outputs")
+OUTPUT_DIR = Path(__file__).resolve().parent / "outputs"
 OUTPUT_DIR.mkdir(exist_ok=True)
 logger.info(f"[CONFIG] Output folder: {OUTPUT_DIR.resolve()}")
+
+# ─── Background File Cleanup Task ─────────────────────────────
+async def cleanup_old_files_task():
+    """Background task running hourly to delete outputs older than 24 hours."""
+    while True:
+        try:
+            logger.info("[CLEANUP] Scanning for old files in outputs/...")
+            now = datetime.now()
+            cutoff = now - timedelta(hours=24)
+            count = 0
+            if OUTPUT_DIR.exists():
+                for file_path in OUTPUT_DIR.glob("*.png"):
+                    if file_path.is_file():
+                        mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
+                        if mtime < cutoff:
+                            file_path.unlink()
+                            count += 1
+            if count > 0:
+                logger.info(f"[CLEANUP] Deleted {count} files older than 24 hours.")
+            else:
+                logger.info("[CLEANUP] No old files found.")
+        except Exception as e:
+            logger.error(f"[CLEANUP ERROR] Failed to clean files: {e}")
+        
+        # Sleep for 1 hour
+        await asyncio.sleep(3600)
 
 # ─── FastAPI App ───────────────────────────────────────────────
 app = FastAPI(
@@ -46,21 +75,54 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# ─── Startup Event ────────────────────────────────────────────
+@app.on_event("startup")
+async def startup_event():
+    # 1. Verify critical environment variables
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key or "sk-" not in openai_key or openai_key == "placeholder_key_not_set":
+        logger.error("❌ CRITICAL: OPENAI_API_KEY is not configured or is invalid! AI features will fail.")
+    else:
+        logger.info("✅ OPENAI_API_KEY is configured.")
+
+    model = os.getenv("OPENAI_MODEL")
+    if not model:
+        logger.error("❌ CRITICAL: OPENAI_MODEL is not set in environment.")
+    else:
+        logger.info(f"✅ Image Model: {model}")
+
+    vision_model = os.getenv("VISION_MODEL")
+    if not vision_model:
+        logger.error("❌ CRITICAL: VISION_MODEL is not set in environment.")
+    else:
+        logger.info(f"✅ Vision Model: {vision_model}")
+
+    # 2. Start background cleanup task
+    asyncio.create_task(cleanup_old_files_task())
+    logger.info("🧹 Background task cleanup_old_files_task initialized (hourly run).")
+
 # ─── Static Files (serve saved images) ───────────────────────
 app.mount("/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
 
 # ─── CORS ─────────────────────────────────────────────────────
+origins_env = os.getenv("CORS_ORIGINS")
+origins = [origin.strip() for origin in origins_env.split(",")] if origins_env else ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
 # ─── Include Pant Router ──────────────────────────────────────
 from pant import router as pant_router
 app.include_router(pant_router)
+
+# ─── Include Full Router ──────────────────────────────────────
+from full import router as full_router
+app.include_router(full_router)
 
 # ─── Constants ────────────────────────────────────────────────
 ALLOWED_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
@@ -96,13 +158,29 @@ def image_to_base64(image_bytes: bytes) -> str:
 def validate_image(file: UploadFile, label: str):
     """Accept any image format — Pillow handles conversion internally."""
     content_type = file.content_type or ""
-    if not content_type.startswith("image/"):
+    if not content_type.startswith("image/") and content_type != "application/octet-stream":
         logger.warning(f"[VALIDATION] ❌ Invalid {label} type: {content_type}")
         raise HTTPException(
             status_code=400,
             detail=f"{label} must be an image file. Got: {content_type}"
         )
     logger.info(f"[VALIDATION] ✅ {label} | Type: {content_type} | Name: {file.filename}")
+
+
+def validate_image_integrity(image_bytes: bytes, label: str):
+    """Ensure image bytes are valid and can be opened/verified by PIL."""
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail=f"{label} is empty.")
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.verify()  # Verifies file integrity
+    except Exception as e:
+        logger.warning(f"[VALIDATION] ❌ Invalid image bytes for {label}: {str(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{label} is not a valid image file or is corrupted."
+        )
+
 
 
 async def analyze_photos_with_vision(user_photo_bytes: bytes, dress_photo_bytes: bytes) -> dict:
@@ -174,7 +252,8 @@ async def analyze_photos_with_vision(user_photo_bytes: bytes, dress_photo_bytes:
 async def generate_virtual_tryon(
     user_photo_bytes: bytes,
     dress_photo_bytes: bytes,
-    dress_size: str
+    dress_size: str,
+    base_url: str = "http://localhost:8000/"
 ) -> dict:
     """
     Generate virtual try-on by editing the actual user photo to wear the given dress.
@@ -248,8 +327,7 @@ async def generate_virtual_tryon(
     with open(file_path, "wb") as f:
         f.write(image_bytes_out)
 
-    port      = int(os.getenv("PORT", 8000))
-    image_url = f"http://localhost:{port}/outputs/{filename}"
+    image_url = f"{base_url}outputs/{filename}"
 
     logger.info(f"[STEP 6] Image saved → {file_path}")
     logger.info(f"[STEP 6] Access URL  → {image_url}")
@@ -262,6 +340,7 @@ async def generate_virtual_tryon(
         "filename":     filename,
         "message":      f"Try-on generated! Size: {dress_size}, Type: {dress_type}"
     }
+
 
 
 # ──────────────────────────────────────────────────────────────
@@ -316,7 +395,7 @@ async def virtual_try_on(
             detail=f"Invalid size '{dress_size}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
         )
 
-    # Validate images
+    # Validate content-type headers
     validate_image(user_photo,  "User photo")
     validate_image(dress_photo, "Dress photo")
 
@@ -331,27 +410,51 @@ async def virtual_try_on(
     if len(dress_photo_bytes) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Dress photo exceeds 10MB limit")
 
+    # Validate image bytes integrity
+    validate_image_integrity(user_photo_bytes, "User photo")
+    validate_image_integrity(dress_photo_bytes, "Dress photo")
+
     logger.info(f"[READ] User photo  : {len(user_photo_bytes)  / 1024:.1f} KB")
     logger.info(f"[READ] Dress photo : {len(dress_photo_bytes) / 1024:.1f} KB")
+
+    base_url = str(request.base_url)
 
     # Generate try-on
     try:
         result = await generate_virtual_tryon(
             user_photo_bytes=user_photo_bytes,
             dress_photo_bytes=dress_photo_bytes,
-            dress_size=size_upper
+            dress_size=size_upper,
+            base_url=base_url
         )
 
         logger.info("[RESPONSE] ✅ Sending success response to client")
-        base_url = str(request.base_url)
-        dynamic_url = f"{base_url}outputs/{result['filename']}"
         return JSONResponse(
             status_code=200,
             content={
-                "image_url": dynamic_url
+                "image_url": result["image_url"]
             }
         )
 
+    except openai.RateLimitError as e:
+        logger.error(f"[RATE LIMIT] ❌ Rate limit exceeded: {str(e)}")
+        raise HTTPException(
+            status_code=429,
+            detail="AI service rate limit exceeded. Please wait a moment before trying again."
+        )
+    except openai.APIConnectionError as e:
+        logger.error(f"[CONNECTION ERROR] ❌ Connection error: {str(e)}")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not reach the AI service provider. Please verify network connectivity."
+        )
+    except openai.APIStatusError as e:
+        logger.error(f"[API ERROR] ❌ OpenAI status error {e.status_code}: {e.message}")
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=f"AI service error: {e.message}"
+        )
     except Exception as e:
         logger.error(f"[ERROR] ❌ Try-on generation failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Try-on generation failed: {str(e)}")
+
