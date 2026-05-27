@@ -307,12 +307,13 @@ async def virtual_try_on(
     logger.info(f"  Dress Size : {dress_size}")
     logger.info("=" * 60)
 
-    # Validate size
-    if dress_size.upper() not in VALID_SIZES:
+    # Validate size: allows standard sizes (XS, S, M, L, XL, XXL, XXXL) or any numeric size
+    size_upper = dress_size.strip().upper()
+    if size_upper not in VALID_SIZES and not size_upper.isdigit():
         logger.warning(f"[VALIDATION] ❌ Invalid dress size: {dress_size}")
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid size '{dress_size}'. Valid: {', '.join(VALID_SIZES)}"
+            detail=f"Invalid size '{dress_size}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
         )
 
     # Validate images
@@ -338,7 +339,7 @@ async def virtual_try_on(
         result = await generate_virtual_tryon(
             user_photo_bytes=user_photo_bytes,
             dress_photo_bytes=dress_photo_bytes,
-            dress_size=dress_size.upper()
+            dress_size=size_upper
         )
 
         logger.info("[RESPONSE] ✅ Sending success response to client")

@@ -250,12 +250,13 @@ async def pant_try_on(
     logger.info(f"  Gender     : {gender}")
     logger.info("=" * 60)
 
-    # Validate size
-    if pant_size.upper() not in VALID_SIZES and pant_size not in VALID_SIZES:
+    # Validate size: allows standard sizes (XS, S, M, L, XL, XXL, XXXL) or any numeric size
+    size_upper = pant_size.strip().upper()
+    if size_upper not in VALID_SIZES and not size_upper.isdigit():
         logger.warning(f"[VALIDATION] ❌ Invalid pant size: {pant_size}")
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid size '{pant_size}'. Valid: {', '.join(VALID_SIZES)}"
+            detail=f"Invalid size '{pant_size}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
         )
 
     # Validate photo_type
@@ -288,7 +289,7 @@ async def pant_try_on(
         result = await generate_pant_tryon(
             user_photo_bytes=user_photo_bytes,
             pant_photo_bytes=pant_photo_bytes,
-            pant_size=pant_size.upper(),
+            pant_size=size_upper,
             pant_type=pant_type,
             photo_type=photo_type,
             gender=gender
