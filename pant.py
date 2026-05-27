@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from PIL import Image
 import io
+import json
 
 load_dotenv()
 
@@ -75,77 +76,108 @@ def validate_image_pant(file: UploadFile, label: str):
     logger.info(f"[PANT VALIDATION] ✅ {label} | Type: {content_type} | Name: {file.filename}")
 
 
-async def analyze_pant_with_vision(pant_photo_bytes: bytes, pant_type: str) -> str:
+async def analyze_photos_with_vision_pant(user_photo_bytes: bytes, pant_photo_bytes: bytes) -> dict:
     """
-    Use Vision model to analyze pant/shorts photo and return precise description.
-    Used to accurately recreate the pant on user's photo.
+    Use Vision Model to analyze both the user photo and the pant/shorts photo.
+    Returns a dictionary containing 'gender', 'pant_type', 'photo_type', and 'description'.
     """
-    logger.info(f"[VISION] Analyzing {pant_type} photo with {VISION_MODEL}...")
+    logger.info(f"[VISION] Analyzing user & pant photos with {VISION_MODEL}...")
+    user_b64 = image_to_base64_pant(user_photo_bytes)
     pant_b64 = image_to_base64_pant(pant_photo_bytes)
 
-    response = await client.chat.completions.create(
-        model=VISION_MODEL,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{pant_b64}"}
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        f"Analyze this {pant_type} for a virtual try-on. "
-                        f"Describe only the clothing details precisely: "
-                        f"1) Exact color(s) "
-                        f"2) Pattern (solid, striped, camouflage, graphic, etc.) "
-                        f"3) Fabric appearance (denim, cotton, linen, polyester, etc.) "
-                        f"4) Waistband style (elastic, drawstring, button, belt loops) "
-                        f"5) Leg style (straight, slim, wide-leg, tapered, bootcut) "
-                        f"6) Length (full length, knee-length, mid-thigh, ankle) "
-                        f"7) Any pockets, zippers, logos, or special details "
-                        f"8) Fit style (slim, regular, relaxed, oversized) "
-                        f"Keep description short and precise."
-                    )
-                }
-            ]
-        }],
-        max_tokens=300
-    )
+    try:
+        response = await client.chat.completions.create(
+            model=VISION_MODEL,
+            response_format={"type": "json_object"},
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{user_b64}"}
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{pant_b64}"}
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "Analyze these two photos for a virtual try-on:\n"
+                            "The first image is the user's photo.\n"
+                            "The second image is the pant / shorts / lower-body clothing photo.\n"
+                            "Please return a JSON object with the following fields:\n"
+                            "1. 'gender': Determine the gender of the user from the first photo. It must be one of: 'man', 'woman', or 'person'.\n"
+                            "2. 'pant_type': Determine the type of lower-body clothing in the second photo. E.g. 'pants', 'shorts', 'jeans', 'trousers', 'leggings', 'skirt'.\n"
+                            "3. 'photo_type': Detect if the first photo is a full-body photo ('full') or a bottom-half/waist-down photo ('bottom').\n"
+                            "4. 'description': A precise detailed description of the pant in the second photo (exact color, patterns, fabric like denim/cotton, waistband like elastic/drawstring/button, pockets, leg style like slim/straight/wide, and fit style for try-on editing).\n\n"
+                            "Provide the response in raw JSON format matching this schema:\n"
+                            "{\"gender\": string, \"pant_type\": string, \"photo_type\": string, \"description\": string}"
+                        )
+                    }
+                ]
+            }],
+            max_tokens=400
+        )
 
-    description = response.choices[0].message.content
-    logger.info(f"[VISION] {pant_type} analyzed | Description: {description[:100]}...")
-    return description
+        result_text = response.choices[0].message.content
+        logger.info(f"[VISION] Analysis response: {result_text}")
+        data = json.loads(result_text)
+        
+        # Ensure fallbacks
+        data.setdefault("gender", "person")
+        data.setdefault("pant_type", "pants")
+        data.setdefault("photo_type", "full")
+        data.setdefault("description", "pants")
+        
+        if data["gender"] not in ("man", "woman", "person"):
+            data["gender"] = "person"
+        if data["photo_type"] not in ("full", "bottom"):
+            data["photo_type"] = "full"
+            
+        return data
+
+    except Exception as e:
+        logger.error(f"[VISION ERROR] Vision analysis failed, using fallbacks: {str(e)}")
+        return {
+            "gender": "person",
+            "pant_type": "pants",
+            "photo_type": "full",
+            "description": "pants"
+        }
 
 
 async def generate_pant_tryon(
     user_photo_bytes: bytes,
     pant_photo_bytes: bytes,
-    pant_size: str,
-    pant_type: str,
-    photo_type: str = "full",
-    gender: str = "person"
+    pant_size: str
 ) -> dict:
     """
     Generate virtual pant/shorts try-on by editing user's photo.
 
     Steps:
       1. Resize both images
-      2. Analyze pant photo using Vision model → detailed description
+      2. Analyze photos using Vision model → detailed description, pant type, photo type, gender
       3. Use images.edit() on user's photo targeting lower body only
       4. Save generated image to outputs/ folder
       5. Return image URL and base64
     """
-    logger.info(f"[PANT TRY-ON START] Type: {pant_type} | Size: {pant_size} | Photo: {photo_type} | Gender: {gender}")
+    logger.info(f"[PANT TRY-ON START] Size: {pant_size}")
 
     # ── Step 1: Resize images ──────────────────────────────────
     logger.info("[STEP 1] Resizing images...")
     user_photo_resized = resize_image_pant(user_photo_bytes,  max_size=1024)
     pant_photo_resized = resize_image_pant(pant_photo_bytes, max_size=1024)
 
-    # ── Step 2: Analyze pant with Vision model ─────────────────
-    logger.info("[STEP 2] Analyzing pant/shorts with Vision model...")
-    pant_description = await analyze_pant_with_vision(pant_photo_resized, pant_type)
+    # ── Step 2: Analyze photos with Vision model ───────────────
+    logger.info("[STEP 2] Analyzing photos with GPT-4o Vision...")
+    analysis = await analyze_photos_with_vision_pant(user_photo_resized, pant_photo_resized)
+    gender = analysis["gender"]
+    pant_type = analysis["pant_type"]
+    photo_type = analysis["photo_type"]
+    pant_description = analysis["description"]
+
+    logger.info(f"[ANALYSIS DETECTED] Gender: {gender} | Type: {pant_type} | Photo Type: {photo_type} | Desc: {pant_description[:100]}...")
 
     # ── Step 3: Build edit prompt ──────────────────────────────
     # Adjust prompt based on whether user sent full body or bottom-half photo
@@ -227,27 +259,21 @@ async def pant_try_on(
     request: Request,
     user_photo:  UploadFile = File(..., description="User's photo — full body OR bottom half (waist down)"),
     pant_photo:  UploadFile = File(..., description="Pants / shorts / jeans photo"),
-    pant_size:   str        = Form(..., description="Size: S, M, L, XL or waist 28, 30, 32..."),
-    pant_type:   str        = Form(default="pants",  description="pants / shorts / jeans / trousers / chinos"),
-    photo_type:  str        = Form(default="full",   description="full = full body photo | bottom = waist-down photo"),
-    gender:      str        = Form(default="person", description="person / man / woman")
+    pant_size:   str        = Form(..., description="Size: S, M, L, XL or waist 28, 30, 32...")
 ):
     """
     Virtual Pant/Shorts Try-On Endpoint.
 
     - Upload user's photo (full body OR bottom half)
     - Upload pants/shorts photo
-    - AI analyzes the pants → edits only the lower body in user's real photo
+    - AI analyzes the pants automatically → edits only the lower body in user's real photo
     - Returns user's real photo with the pants/shorts applied
     """
     logger.info("=" * 60)
     logger.info("[PANT REQUEST] 📥 New pant try-on request")
     logger.info(f"  User Photo : {user_photo.filename}")
     logger.info(f"  Pant Photo : {pant_photo.filename}")
-    logger.info(f"  Pant Type  : {pant_type}")
     logger.info(f"  Pant Size  : {pant_size}")
-    logger.info(f"  Photo Type : {photo_type} ({'full body' if photo_type == 'full' else 'bottom half'})")
-    logger.info(f"  Gender     : {gender}")
     logger.info("=" * 60)
 
     # Validate size: allows standard sizes (XS, S, M, L, XL, XXL, XXXL) or any numeric size
@@ -257,13 +283,6 @@ async def pant_try_on(
         raise HTTPException(
             status_code=400,
             detail=f"Invalid size '{pant_size}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
-        )
-
-    # Validate photo_type
-    if photo_type not in ("full", "bottom"):
-        raise HTTPException(
-            status_code=400,
-            detail="photo_type must be 'full' (full body) or 'bottom' (waist-down photo)"
         )
 
     # Validate images
@@ -289,10 +308,7 @@ async def pant_try_on(
         result = await generate_pant_tryon(
             user_photo_bytes=user_photo_bytes,
             pant_photo_bytes=pant_photo_bytes,
-            pant_size=size_upper,
-            pant_type=pant_type,
-            photo_type=photo_type,
-            gender=gender
+            pant_size=size_upper
         )
 
         logger.info("[RESPONSE] ✅ Sending pant try-on success response")
