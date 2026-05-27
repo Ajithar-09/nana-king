@@ -3,7 +3,6 @@ import logging
 import uvicorn
 from dotenv import load_dotenv
 from shirt import app
-
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -26,7 +25,7 @@ async def health_check():
 
 # ─── Run Server ────────────────────────────────────────────────
 if __name__ == "__main__":
-    port  = int(os.getenv("PORT", 8000))
+    port  = int(os.getenv("PORT"))
     model = os.getenv("OPENAI_MODEL")
     logger.info("🚀 Starting Virtual Try-On API Server...")
     logger.info(f"📍 Port  : {port}")

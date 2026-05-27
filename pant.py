@@ -255,12 +255,7 @@ async def generate_pant_tryon(
 # ──────────────────────────────────────────────────────────────
 
 @router.post("/api/pant-try-on")
-async def pant_try_on(
-    request: Request,
-    user_photo:  UploadFile = File(..., description="User's photo — full body OR bottom half (waist down)"),
-    pant_photo:  UploadFile = File(..., description="Pants / shorts / jeans photo"),
-    pant_size:   str        = Form(..., description="Size: S, M, L, XL or waist 28, 30, 32...")
-):
+async def pant_try_on(request: Request):
     """
     Virtual Pant/Shorts Try-On Endpoint.
 
@@ -269,20 +264,53 @@ async def pant_try_on(
     - AI analyzes the pants automatically → edits only the lower body in user's real photo
     - Returns user's real photo with the pants/shorts applied
     """
+    form = await request.form()
+    logger.info(f"[DEBUG] Raw Form Keys: {list(form.keys())}")
+
+    # Strip spaces from keys
+    form_data = {k.strip(): v for k, v in form.items()}
+
+    user_photo = form_data.get("user_photo")
+    pant_photo = form_data.get("pant_photo") or form_data.get("dress_photo")
+    pant_size = form_data.get("pant_size") or form_data.get("dress_size")
+
+    if not user_photo or not getattr(user_photo, "filename", None):
+        logger.warning(f"[VALIDATION] ❌ Missing user photo. Available keys: {list(form_data.keys())}")
+        raise HTTPException(
+            status_code=400,
+            detail="user_photo is required."
+        )
+
+    if not pant_photo or not getattr(pant_photo, "filename", None):
+        logger.warning(f"[VALIDATION] ❌ Missing pant photo. Available keys: {list(form_data.keys())}")
+        raise HTTPException(
+            status_code=400,
+            detail="pant_photo is required."
+        )
+
+    if not pant_size:
+        logger.warning(f"[VALIDATION] ❌ Missing size. Available keys: {list(form_data.keys())}")
+        raise HTTPException(
+            status_code=400,
+            detail="pant_size is required."
+        )
+
+    pant_size_str = str(pant_size).strip()
+
     logger.info("=" * 60)
     logger.info("[PANT REQUEST] 📥 New pant try-on request")
     logger.info(f"  User Photo : {user_photo.filename}")
     logger.info(f"  Pant Photo : {pant_photo.filename}")
-    logger.info(f"  Pant Size  : {pant_size}")
+    logger.info(f"  Pant Size  : {pant_size_str}")
     logger.info("=" * 60)
 
     # Validate size: allows standard sizes (XS, S, M, L, XL, XXL, XXXL) or any numeric size
-    size_upper = pant_size.strip().upper()
+    size_upper = pant_size_str.upper()
     if size_upper not in VALID_SIZES and not size_upper.isdigit():
-        logger.warning(f"[VALIDATION] ❌ Invalid pant size: {pant_size}")
+        logger.warning(f"[VALIDATION] ❌ Invalid pant size: {pant_size_str}")
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid size '{pant_size}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
+            detail=f"Invalid size '{pant_size_str}'. Valid: {', '.join(VALID_SIZES)} or any numeric size (e.g. 28, 30, 32, 34, 36, 38, 40, 42)"
         )
 
     # Validate images
