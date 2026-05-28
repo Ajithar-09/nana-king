@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import io
 import json
+from moderation import moderate_images
 
 load_dotenv()
 
@@ -120,16 +121,23 @@ async def analyze_photos_with_vision_pant(user_photo_bytes: bytes, pant_photo_by
                     {
                         "type": "text",
                         "text": (
-                            "Analyze these two photos for a virtual try-on:\n"
+                            "Analyze these two photos for a virtual try-on and safety compliance:\n"
                             "The first image is the user's photo.\n"
                             "The second image is the pant / shorts / lower-body clothing photo.\n"
+                            "First, perform a safety check on both photos. Check for:\n"
+                            "- Nudity, semi-nudity (underwear, swimwear, or bare chests where inappropriate),\n"
+                            "- Transparent or see-through clothing that reveals private body parts,\n"
+                            "- Obscene/vulgar gestures (e.g., middle finger),\n"
+                            "- Offensive/vulgar text, graphics, or symbols on clothing or background.\n\n"
                             "Please return a JSON object with the following fields:\n"
-                            "1. 'gender': Determine the gender of the user from the first photo. It must be one of: 'man', 'woman', or 'person'.\n"
-                            "2. 'pant_type': Determine the type of lower-body clothing in the second photo. E.g. 'pants', 'shorts', 'jeans', 'trousers', 'leggings', 'skirt'.\n"
-                            "3. 'photo_type': Detect if the first photo is a full-body photo ('full') or a bottom-half/waist-down photo ('bottom').\n"
-                            "4. 'description': A precise detailed description of the pant in the second photo (exact color, patterns, fabric like denim/cotton, waistband like elastic/drawstring/button, pockets, leg style like slim/straight/wide, and fit style for try-on editing).\n\n"
+                            "1. 'is_safe': A boolean (true or false). Set to false if either image contains nudity, semi-nudity, underwear, transparent clothing, obscene gestures, or vulgar graphics/text. Otherwise, set to true.\n"
+                            "2. 'safety_reason': If 'is_safe' is false, write a short descriptive reason in English explaining which image was unsafe and why. If safe, set to empty string.\n"
+                            "3. 'gender': Determine the gender of the user from the first photo. It must be one of: 'man', 'woman', or 'person'.\n"
+                            "4. 'pant_type': Determine the type of lower-body clothing in the second photo. E.g. 'pants', 'shorts', 'jeans', 'trousers', 'leggings', 'skirt'.\n"
+                            "5. 'photo_type': Detect if the first photo is a full-body photo ('full') or a bottom-half/waist-down photo ('bottom').\n"
+                            "6. 'description': A precise detailed description of the pant in the second photo (exact color, patterns, fabric like denim/cotton, waistband like elastic/drawstring/button, pockets, leg style like slim/straight/wide, and fit style for try-on editing).\n\n"
                             "Provide the response in raw JSON format matching this schema:\n"
-                            "{\"gender\": string, \"pant_type\": string, \"photo_type\": string, \"description\": string}"
+                            "{\"is_safe\": boolean, \"safety_reason\": string, \"gender\": string, \"pant_type\": string, \"photo_type\": string, \"description\": string}"
                         )
                     }
                 ]
@@ -142,11 +150,20 @@ async def analyze_photos_with_vision_pant(user_photo_bytes: bytes, pant_photo_by
         data = json.loads(result_text)
         
         # Ensure fallbacks
+        data.setdefault("is_safe", True)
+        data.setdefault("safety_reason", "")
         data.setdefault("gender", "person")
         data.setdefault("pant_type", "pants")
         data.setdefault("photo_type", "full")
         data.setdefault("description", "pants")
         
+        if not data["is_safe"]:
+            logger.warning(f"[VISION SAFETY] ❌ Safety check failed: {data['safety_reason']}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Safety restriction: {data['safety_reason']}"
+            )
+            
         if data["gender"] not in ("man", "woman", "person"):
             data["gender"] = "person"
         if data["photo_type"] not in ("full", "bottom"):
@@ -154,9 +171,14 @@ async def analyze_photos_with_vision_pant(user_photo_bytes: bytes, pant_photo_by
             
         return data
 
+    except HTTPException as e:
+        # Propagate custom moderation/safety errors
+        raise e
     except Exception as e:
         logger.error(f"[VISION ERROR] Vision analysis failed, using fallbacks: {str(e)}")
         return {
+            "is_safe": True,
+            "safety_reason": "",
             "gender": "person",
             "pant_type": "pants",
             "photo_type": "full",
@@ -349,6 +371,13 @@ async def pant_try_on(request: Request):
     validate_image_integrity_pant(user_photo_bytes, "User photo")
     validate_image_integrity_pant(pant_photo_bytes, "Pant photo")
 
+    # Content moderation (pre-validation)
+    await moderate_images(
+        client=client,
+        images_bytes=[user_photo_bytes, pant_photo_bytes],
+        labels=["User photo", "Pant photo"]
+    )
+
     logger.info(f"[READ] User photo : {len(user_photo_bytes) / 1024:.1f} KB")
     logger.info(f"[READ] Pant photo : {len(pant_photo_bytes) / 1024:.1f} KB")
 
@@ -371,6 +400,9 @@ async def pant_try_on(request: Request):
             }
         )
 
+    except HTTPException as e:
+        # Propagate custom moderation / validation errors
+        raise e
     except openai.RateLimitError as e:
         logger.error(f"[RATE LIMIT] ❌ Rate limit exceeded: {str(e)}")
         raise HTTPException(

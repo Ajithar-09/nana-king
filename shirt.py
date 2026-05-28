@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import io
 import json
+from moderation import moderate_images
 
 load_dotenv()
 
@@ -210,15 +211,22 @@ async def analyze_photos_with_vision(user_photo_bytes: bytes, dress_photo_bytes:
                     {
                         "type": "text",
                         "text": (
-                            "Analyze these two photos for a virtual try-on:\n"
+                            "Analyze these two photos for a virtual try-on and safety compliance:\n"
                             "The first image is the user's photo.\n"
                             "The second image is the dress photo.\n"
+                            "First, perform a safety check on both photos. Check for:\n"
+                            "- Nudity, semi-nudity (underwear, swimwear, or bare chests where inappropriate),\n"
+                            "- Transparent or see-through clothing that reveals private body parts,\n"
+                            "- Obscene/vulgar gestures (e.g., middle finger),\n"
+                            "- Offensive/vulgar text, graphics, or symbols on clothing or background.\n\n"
                             "Please return a JSON object with the following fields:\n"
-                            "1. 'gender': Determine the gender of the user from the first photo. It must be one of: 'man', 'woman', or 'person'.\n"
-                            "2. 'dress_type': Determine the type of clothing in the second photo. It must be a short name like 'shirt', 't-shirt', 'hoodie', 'sweater', 'top', etc.\n"
-                            "3. 'description': A detailed description of the dress in the second photo (color, pattern, neckline, sleeve length, logos/prints, buttons/zippers, etc.) for try-on editing.\n\n"
+                            "1. 'is_safe': A boolean (true or false). Set to false if either image contains nudity, semi-nudity, underwear, transparent clothing, obscene gestures, or vulgar graphics/text. Otherwise, set to true.\n"
+                            "2. 'safety_reason': If 'is_safe' is false, write a short descriptive reason in English explaining which image was unsafe and why. If safe, set to empty string.\n"
+                            "3. 'gender': Determine the gender of the user from the first photo. It must be one of: 'man', 'woman', or 'person'.\n"
+                            "4. 'dress_type': Determine the type of clothing in the second photo. It must be a short name like 'shirt', 't-shirt', 'hoodie', 'sweater', 'top', etc.\n"
+                            "5. 'description': A detailed description of the dress in the second photo (color, pattern, neckline, sleeve length, logos/prints, buttons/zippers, etc.) for try-on editing.\n\n"
                             "Provide the response in raw JSON format matching this schema:\n"
-                            "{\"gender\": string, \"dress_type\": string, \"description\": string}"
+                            "{\"is_safe\": boolean, \"safety_reason\": string, \"gender\": string, \"dress_type\": string, \"description\": string}"
                         )
                     }
                 ]
@@ -231,18 +239,32 @@ async def analyze_photos_with_vision(user_photo_bytes: bytes, dress_photo_bytes:
         data = json.loads(result_text)
         
         # Ensure fallback keys exist and are valid
+        data.setdefault("is_safe", True)
+        data.setdefault("safety_reason", "")
         data.setdefault("gender", "person")
         data.setdefault("dress_type", "t-shirt")
         data.setdefault("description", "clothing")
         
+        if not data["is_safe"]:
+            logger.warning(f"[VISION SAFETY] ❌ Safety check failed: {data['safety_reason']}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Safety restriction: {data['safety_reason']}"
+            )
+            
         if data["gender"] not in ("man", "woman", "person"):
             data["gender"] = "person"
             
         return data
 
+    except HTTPException as e:
+        # Propagate safety HTTP exceptions
+        raise e
     except Exception as e:
         logger.error(f"[VISION ERROR] Vision analysis failed, using fallbacks: {str(e)}")
         return {
+            "is_safe": True,
+            "safety_reason": "",
             "gender": "person",
             "dress_type": "t-shirt",
             "description": "clothing swap"
@@ -414,6 +436,13 @@ async def virtual_try_on(
     validate_image_integrity(user_photo_bytes, "User photo")
     validate_image_integrity(dress_photo_bytes, "Dress photo")
 
+    # Content moderation (pre-validation)
+    await moderate_images(
+        client=client,
+        images_bytes=[user_photo_bytes, dress_photo_bytes],
+        labels=["User photo", "Dress photo"]
+    )
+
     logger.info(f"[READ] User photo  : {len(user_photo_bytes)  / 1024:.1f} KB")
     logger.info(f"[READ] Dress photo : {len(dress_photo_bytes) / 1024:.1f} KB")
 
@@ -436,6 +465,9 @@ async def virtual_try_on(
             }
         )
 
+    except HTTPException as e:
+        # Propagate custom moderation / validation errors
+        raise e
     except openai.RateLimitError as e:
         logger.error(f"[RATE LIMIT] ❌ Rate limit exceeded: {str(e)}")
         raise HTTPException(

@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from PIL import Image
 import io
 import json
+from moderation import moderate_images
 
 load_dotenv()
 
@@ -109,15 +110,22 @@ async def analyze_full_outfit_with_vision(user_photo_bytes: bytes, outfit_photo_
                     {
                         "type": "text",
                         "text": (
-                            "Analyze these two photos for a virtual try-on:\n"
+                            "Analyze these two photos for a virtual try-on and safety compliance:\n"
                             "The first image is the user's full-body photo.\n"
                             "The second image is the full outfit / dress / suit photo.\n"
+                            "First, perform a safety check on both photos. Check for:\n"
+                            "- Nudity, semi-nudity (underwear, swimwear, or bare chests where inappropriate),\n"
+                            "- Transparent or see-through clothing that reveals private body parts,\n"
+                            "- Obscene/vulgar gestures (e.g., middle finger),\n"
+                            "- Offensive/vulgar text, graphics, or symbols on clothing or background.\n\n"
                             "Please return a JSON object with the following fields:\n"
-                            "1. 'gender': Determine the gender of the user ('man', 'woman', or 'person').\n"
-                            "2. 'dress_type': e.g., 'dress', 'suit', 'jumpsuit', 'gown', 'outfit'.\n"
-                            "3. 'description': Detailed description of the outfit (color, patterns, fabric style, neckline, sleeves, pockets, length, etc.) for try-on editing.\n\n"
+                            "1. 'is_safe': A boolean (true or false). Set to false if either image contains nudity, semi-nudity, underwear, transparent clothing, obscene gestures, or vulgar graphics/text. Otherwise, set to true.\n"
+                            "2. 'safety_reason': If 'is_safe' is false, write a short descriptive reason in English explaining which image was unsafe and why. If safe, set to empty string.\n"
+                            "3. 'gender': Determine the gender of the user ('man', 'woman', or 'person').\n"
+                            "4. 'dress_type': e.g., 'dress', 'suit', 'jumpsuit', 'gown', 'outfit'.\n"
+                            "5. 'description': Detailed description of the outfit (color, patterns, fabric style, neckline, sleeves, pockets, length, etc.) for try-on editing.\n\n"
                             "Provide the response in raw JSON format matching this schema:\n"
-                            "{\"gender\": string, \"dress_type\": string, \"description\": string}"
+                            "{\"is_safe\": boolean, \"safety_reason\": string, \"gender\": string, \"dress_type\": string, \"description\": string}"
                         )
                     }
                 ]
@@ -125,13 +133,25 @@ async def analyze_full_outfit_with_vision(user_photo_bytes: bytes, outfit_photo_
             max_tokens=400
         )
         data = json.loads(response.choices[0].message.content)
+        data.setdefault("is_safe", True)
+        data.setdefault("safety_reason", "")
         data.setdefault("gender", "person")
         data.setdefault("dress_type", "outfit")
         data.setdefault("description", "clothing outfit")
+
+        if not data["is_safe"]:
+            logger.warning(f"[VISION SAFETY] ❌ Safety check failed: {data['safety_reason']}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Safety restriction: {data['safety_reason']}"
+            )
+
         return data
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"[VISION ERROR] Full outfit analysis failed: {str(e)}")
-        return {"gender": "person", "dress_type": "outfit", "description": "clothing outfit"}
+        return {"is_safe": True, "safety_reason": "", "gender": "person", "dress_type": "outfit", "description": "clothing outfit"}
 
 
 async def analyze_shirt_with_vision(user_photo_bytes: bytes, shirt_photo_bytes: bytes) -> dict:
@@ -152,15 +172,22 @@ async def analyze_shirt_with_vision(user_photo_bytes: bytes, shirt_photo_bytes: 
                     {
                         "type": "text",
                         "text": (
-                            "Analyze these two photos for a virtual try-on:\n"
+                            "Analyze these two photos for a virtual try-on and safety compliance:\n"
                             "The first image is the user's photo.\n"
                             "The second image is the shirt / top photo.\n"
+                            "First, perform a safety check on both photos. Check for:\n"
+                            "- Nudity, semi-nudity (underwear, swimwear, or bare chests where inappropriate),\n"
+                            "- Transparent or see-through clothing that reveals private body parts,\n"
+                            "- Obscene/vulgar gestures (e.g., middle finger),\n"
+                            "- Offensive/vulgar text, graphics, or symbols on clothing or background.\n\n"
                             "Please return a JSON object with the following fields:\n"
-                            "1. 'gender': Determine the gender of the user ('man', 'woman', or 'person').\n"
-                            "2. 'dress_type': e.g., 'shirt', 't-shirt', 'top', 'hoodie', 'sweater'.\n"
-                            "3. 'description': Detailed description of the shirt (color, collar, sleeves, logo, pattern, buttons, pockets, fit) for try-on editing.\n\n"
+                            "1. 'is_safe': A boolean (true or false). Set to false if either image contains nudity, semi-nudity, underwear, transparent clothing, obscene gestures, or vulgar graphics/text. Otherwise, set to true.\n"
+                            "2. 'safety_reason': If 'is_safe' is false, write a short descriptive reason in English explaining which image was unsafe and why. If safe, set to empty string.\n"
+                            "3. 'gender': Determine the gender of the user ('man', 'woman', or 'person').\n"
+                            "4. 'dress_type': e.g., 'shirt', 't-shirt', 'top', 'hoodie', 'sweater'.\n"
+                            "5. 'description': Detailed description of the shirt (color, collar, sleeves, logo, pattern, buttons, pockets, fit) for try-on editing.\n\n"
                             "Provide the response in raw JSON format matching this schema:\n"
-                            "{\"gender\": string, \"dress_type\": string, \"description\": string}"
+                            "{\"is_safe\": boolean, \"safety_reason\": string, \"gender\": string, \"dress_type\": string, \"description\": string}"
                         )
                     }
                 ]
@@ -168,13 +195,25 @@ async def analyze_shirt_with_vision(user_photo_bytes: bytes, shirt_photo_bytes: 
             max_tokens=400
         )
         data = json.loads(response.choices[0].message.content)
+        data.setdefault("is_safe", True)
+        data.setdefault("safety_reason", "")
         data.setdefault("gender", "person")
         data.setdefault("dress_type", "t-shirt")
         data.setdefault("description", "clothing")
+
+        if not data["is_safe"]:
+            logger.warning(f"[VISION SAFETY] ❌ Safety check failed: {data['safety_reason']}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Safety restriction: {data['safety_reason']}"
+            )
+
         return data
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"[VISION ERROR] Shirt analysis failed: {str(e)}")
-        return {"gender": "person", "dress_type": "t-shirt", "description": "clothing"}
+        return {"is_safe": True, "safety_reason": "", "gender": "person", "dress_type": "t-shirt", "description": "clothing"}
 
 
 async def analyze_pant_with_vision(user_photo_bytes: bytes, pant_photo_bytes: bytes) -> dict:
@@ -195,15 +234,22 @@ async def analyze_pant_with_vision(user_photo_bytes: bytes, pant_photo_bytes: by
                     {
                         "type": "text",
                         "text": (
-                            "Analyze these two photos for a virtual try-on:\n"
+                            "Analyze these two photos for a virtual try-on and safety compliance:\n"
                             "The first image is the user's photo.\n"
                             "The second image is the pant / shorts photo.\n"
+                            "First, perform a safety check on both photos. Check for:\n"
+                            "- Nudity, semi-nudity (underwear, swimwear, or bare chests where inappropriate),\n"
+                            "- Transparent or see-through clothing that reveals private body parts,\n"
+                            "- Obscene/vulgar gestures (e.g., middle finger),\n"
+                            "- Offensive/vulgar text, graphics, or symbols on clothing or background.\n\n"
                             "Please return a JSON object with the following fields:\n"
-                            "1. 'gender': Determine the gender of the user ('man', 'woman', or 'person').\n"
-                            "2. 'pant_type': e.g., 'pants', 'shorts', 'jeans', 'trousers', 'leggings'.\n"
-                            "3. 'description': Detailed description of the pant (color, fabric denim/cotton, style, length, waistband, pockets) for try-on editing.\n\n"
+                            "1. 'is_safe': A boolean (true or false). Set to false if either image contains nudity, semi-nudity, underwear, transparent clothing, obscene gestures, or vulgar graphics/text. Otherwise, set to true.\n"
+                            "2. 'safety_reason': If 'is_safe' is false, write a short descriptive reason in English explaining which image was unsafe and why. If safe, set to empty string.\n"
+                            "3. 'gender': Determine the gender of the user ('man', 'woman', or 'person').\n"
+                            "4. 'pant_type': e.g., 'pants', 'shorts', 'jeans', 'trousers', 'leggings'.\n"
+                            "5. 'description': Detailed description of the pant (color, fabric denim/cotton, style, length, waistband, pockets) for try-on editing.\n\n"
                             "Provide the response in raw JSON format matching this schema:\n"
-                            "{\"gender\": string, \"pant_type\": string, \"description\": string}"
+                            "{\"is_safe\": boolean, \"safety_reason\": string, \"gender\": string, \"pant_type\": string, \"description\": string}"
                         )
                     }
                 ]
@@ -211,13 +257,25 @@ async def analyze_pant_with_vision(user_photo_bytes: bytes, pant_photo_bytes: by
             max_tokens=400
         )
         data = json.loads(response.choices[0].message.content)
+        data.setdefault("is_safe", True)
+        data.setdefault("safety_reason", "")
         data.setdefault("gender", "person")
         data.setdefault("pant_type", "pants")
         data.setdefault("description", "pants")
+
+        if not data["is_safe"]:
+            logger.warning(f"[VISION SAFETY] ❌ Safety check failed: {data['safety_reason']}")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Safety restriction: {data['safety_reason']}"
+            )
+
         return data
+    except HTTPException as e:
+        raise e
     except Exception as e:
         logger.error(f"[VISION ERROR] Pant analysis failed: {str(e)}")
-        return {"gender": "person", "pant_type": "pants", "description": "pants"}
+        return {"is_safe": True, "safety_reason": "", "gender": "person", "pant_type": "pants", "description": "pants"}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -320,6 +378,43 @@ async def full_try_on(request: Request):
         raise HTTPException(status_code=400, detail="User photo exceeds 10MB limit")
     validate_image_integrity_full(user_bytes, "User photo")
 
+    images_to_moderate = [user_bytes]
+    moderation_labels = ["User photo"]
+
+    dress_bytes = None
+    if has_dress:
+        dress_bytes = await dress_photo.read()
+        if len(dress_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="Dress photo exceeds 10MB limit")
+        validate_image_integrity_full(dress_bytes, "Dress photo")
+        images_to_moderate.append(dress_bytes)
+        moderation_labels.append("Dress photo")
+
+    shirt_bytes = None
+    if has_shirt:
+        shirt_bytes = await shirt_photo.read()
+        if len(shirt_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="Shirt photo exceeds 10MB limit")
+        validate_image_integrity_full(shirt_bytes, "Shirt photo")
+        images_to_moderate.append(shirt_bytes)
+        moderation_labels.append("Shirt photo")
+
+    pant_bytes = None
+    if has_pant:
+        pant_bytes = await pant_photo.read()
+        if len(pant_bytes) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="Pant photo exceeds 10MB limit")
+        validate_image_integrity_full(pant_bytes, "Pant photo")
+        images_to_moderate.append(pant_bytes)
+        moderation_labels.append("Pant photo")
+
+    # Content moderation (pre-validation)
+    await moderate_images(
+        client=client,
+        images_bytes=images_to_moderate,
+        labels=moderation_labels
+    )
+
     user_photo_resized = resize_image_full(user_bytes, max_size=1024)
 
     # Define variables to hold intermediate & final results
@@ -330,11 +425,6 @@ async def full_try_on(request: Request):
         # Mode 1: Single full dress/suit try-on
         if has_dress:
             logger.info("[MODE] Mode 1: Single Dress Outfit Try-On active")
-            dress_bytes = await dress_photo.read()
-            if len(dress_bytes) > MAX_FILE_SIZE:
-                raise HTTPException(status_code=400, detail="Dress photo exceeds 10MB limit")
-            validate_image_integrity_full(dress_bytes, "Dress photo")
-            
             dress_photo_resized = resize_image_full(dress_bytes, max_size=1024)
 
             # Analyze full outfit details
@@ -367,11 +457,6 @@ async def full_try_on(request: Request):
             # Stage 1: Upper body shirt swap (if shirt_photo provided)
             if has_shirt:
                 logger.info("[STAGE 1] Upper body shirt swap starting...")
-                shirt_bytes = await shirt_photo.read()
-                if len(shirt_bytes) > MAX_FILE_SIZE:
-                    raise HTTPException(status_code=400, detail="Shirt photo exceeds 10MB limit")
-                validate_image_integrity_full(shirt_bytes, "Shirt photo")
-                
                 shirt_photo_resized = resize_image_full(shirt_bytes, max_size=1024)
 
                 shirt_analysis = await analyze_shirt_with_vision(current_user_image, shirt_photo_resized)
@@ -398,11 +483,6 @@ async def full_try_on(request: Request):
             # Stage 2: Lower body pant swap (if pant_photo provided)
             if has_pant:
                 logger.info("[STAGE 2] Lower body pant swap starting...")
-                pant_bytes = await pant_photo.read()
-                if len(pant_bytes) > MAX_FILE_SIZE:
-                    raise HTTPException(status_code=400, detail="Pant photo exceeds 10MB limit")
-                validate_image_integrity_full(pant_bytes, "Pant photo")
-                
                 pant_photo_resized = resize_image_full(pant_bytes, max_size=1024)
 
                 pant_analysis = await analyze_pant_with_vision(current_user_image, pant_photo_resized)
@@ -446,6 +526,9 @@ async def full_try_on(request: Request):
             }
         )
 
+    except HTTPException as e:
+        # Propagate custom moderation / validation errors
+        raise e
     except openai.RateLimitError as e:
         logger.error(f"[RATE LIMIT] ❌ Rate limit exceeded: {str(e)}")
         raise HTTPException(
